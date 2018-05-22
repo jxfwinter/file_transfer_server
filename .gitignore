@@ -1,0 +1,4 @@
+file_transfer_server.creator.user
+/src/build
+/test_client/build
+/bin

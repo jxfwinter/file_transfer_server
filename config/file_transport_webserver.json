@@ -1,0 +1,15 @@
+{
+    "port" : 8921,
+   
+    "domain" : "www.test.com",
+    "domain_comment" : "本服务的域名",
+
+    "log_dir": "./",
+ 
+    "log_level" : 0,
+
+    "root_dir" : "./",
+
+    "session_timeout" : 30,
+    "session_timeout_comment" : "session超时时间"
+}
