@@ -16,7 +16,8 @@ class UploadTask : public std::enable_shared_from_this<UploadTask>
 {
 public:
     UploadTask(const TransportContext& cxt);
-    virtual ~UploadTask() = default;
+    virtual ~UploadTask();
+    int getFileSize() {return m_cxt.file_size; }
     void start();
     void stop(STOP_REASEON r);
 

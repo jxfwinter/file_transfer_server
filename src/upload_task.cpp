@@ -6,6 +6,14 @@ UploadTask::UploadTask(const TransportContext& cxt) : m_cxt(cxt)
     m_tmp_filepath = cxt.file_path + ".tmp";
 }
 
+UploadTask::~UploadTask()
+{
+    if(m_ofs.is_open())
+    {
+        m_ofs.close();
+    }
+}
+
 void UploadTask::start()
 {
     boost::system::error_code e;
