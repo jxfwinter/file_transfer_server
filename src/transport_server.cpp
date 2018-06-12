@@ -79,30 +79,6 @@ FileTransportServer::~FileTransportServer()
 
 }
 
-
-void FileTransportServer::removeDown(const string& key, const DownTransportContextPtr& down)
-{
-    auto it = m_down_transport.find(key);
-    if(it == m_down_transport.end())
-        return;
-
-    auto& downs = it->second;
-    auto down_it = downs.begin();
-    for(; down_it!=downs.end(); ++down_it)
-    {
-        if((*down_it).get() == down.get())
-        {
-            downs.erase(down_it);
-            break;
-        }
-    }
-    if(downs.empty())
-    {
-        m_down_transport.erase(it);
-    }
-}
-
-
 void FileTransportServer::session(SocketPtr socket)
 {
     bool close = false;
@@ -216,7 +192,7 @@ void FileTransportServer::session(SocketPtr socket)
                                 std::make_tuple(http::status::ok, req.version())
                     };
                     res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-                    res.set(http::field::content_type, mime_type(file_path));
+                    res.set(http::field::content_type, mime_type(cxt.file_path));
                     res.content_length(body.size());
                     res.keep_alive(req.keep_alive());
                     return send(std::move(res));
@@ -227,7 +203,7 @@ void FileTransportServer::session(SocketPtr socket)
                 auto it_clen = req.find("Content-Length");
                 if(it_clen == req.end())
                 {
-                    LogErrorExt << "not has Content-Length, file:" << key_filename;
+                    LogErrorExt << "not has Content-Length, file:" << cxt.file_path;
                     return;
                 }
                 cxt.file_size = std::stoi((*it_clen).value().data());
@@ -242,12 +218,11 @@ void FileTransportServer::session(SocketPtr socket)
                     auto it = m_upload_tasks.find(cxt.file_path);
                     if(it != m_upload_tasks.end())
                     {
-                        it->second->stop();
+                        it->second->stop(STOP_REASEON::ERROR);
                         m_upload_tasks.erase(it);
                     }
                     upload_task = std::make_shared<UploadTask>(cxt);
                     m_upload_tasks[cxt.file_path] = upload_task;
-
                 }
 
                 upload_task->start();
@@ -286,6 +261,18 @@ void FileTransportServer::session(SocketPtr socket)
                     }
                     return send(bad_request("recv size not eq content-length"));
                 }
+                else
+                {
+                    LogErrorExt << "recv file success," << cxt.file_path;
+                    upload_task->stop(STOP_REASEON::NORMAL);
+
+                    {
+                        std::lock_guard<boost::fibers::mutex> lk(m_mutex);
+                        m_upload_tasks.erase(cxt.file_path);
+                    }
+                    http::response<http::empty_body> res{http::status::ok, req.version()};
+                    return send(std::move(res));;
+                }
             }
             else
             {
@@ -314,7 +301,7 @@ void FileTransportServer::accept()
     {
         for (;;)
         {
-            SocketPtr socket(new tcp::socket(m_pool.get_io_service()));
+            SocketPtr socket(new tcp::socket(m_pool.get_io_context()));
             boost::system::error_code ec;
             m_accept.async_accept(
                         *socket,

@@ -50,7 +50,7 @@ fail(boost::system::error_code ec, char const* what)
 void do_publish(std::string const& host,
                 std::string const& port,
                 std::string const& filename,
-                io_service_pool& pool)
+                IoContextPool& pool)
 {
     boost::system::error_code ec;
     string target;
@@ -67,8 +67,9 @@ void do_publish(std::string const& host,
               << nsend << ",last_send:" << last_send_len << std::endl;
 
     // These objects perform our I/O
-    tcp::resolver resolver{pool.get_io_service()};
-    tcp::socket socket{pool.get_io_service()};
+    auto&s = pool.get_io_context();
+    tcp::resolver resolver{s};
+    tcp::socket socket{s};
 
     // Look up the domain name
     auto const lookup = resolver.async_resolve({host, port}, boost::fibers::asio::yield[ec]);
@@ -152,18 +153,20 @@ void do_publish(std::string const& host,
 void do_subscribe(std::string const& host,
                   std::string const& port,
                   std::string const& filename,
-                  io_service_pool& pool)
+                  IoContextPool& pool)
 {
 
     boost::system::error_code ec;
     string target;
-    target = "/" + filename;
+    string dir = "test_dir";
+    target = "/" + dir + "/" + filename;
 
     std::cout << "sub," << host << "," << port << "," << target << std::endl;
 
     // These objects perform our I/O
-    tcp::resolver resolver{pool.get_io_service()};
-    tcp::socket socket{pool.get_io_service()};
+    auto& s = pool.get_io_context();
+    tcp::resolver resolver{s};
+    tcp::socket socket{s};
 
     // Look up the domain name
     auto const lookup = resolver.async_resolve({host, port}, boost::fibers::asio::yield[ec]);
@@ -226,7 +229,7 @@ do_session(
         std::string const& port,
         std::string const& filename,
         int subscribe_count,
-        io_service_pool& pool)
+        IoContextPool& pool)
 {
     boost::fibers::fiber(&do_publish,
                          host,
@@ -267,8 +270,8 @@ int main(int argc, char** argv)
 
     // The io_service is required for all I/O
     //boost::asio::io_service ios;
-    io_service_pool::m_pool_size = 3;
-    io_service_pool& pool = io_service_pool::GetInstance();
+    IoContextPool::m_pool_size = 3;
+    IoContextPool& pool = IoContextPool::get_instance();
 
     for(int i=0; i<count; ++i)
         // Launch the asynchronous operation

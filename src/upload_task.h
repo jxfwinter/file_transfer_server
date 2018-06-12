@@ -33,6 +33,6 @@ private:
     boost::fibers::mutex m_down_mutex;
     vector<DownTaskPtr> m_down_tasks;
     ofstream m_ofs;
-}
+};
 
 #endif // UPLOADTASK_H
