@@ -5,6 +5,10 @@
 //          http://www.boost.org/LICENSE_1_0.txt)
 
 #include "transport_server.h"
+#include "down_task.h"
+#include "upload_task.h"
+
+typedef std::shared_ptr<DownTask> DownTaskPtr;
 
 boost::beast::string_view mime_type(boost::beast::string_view path)
 {
@@ -37,7 +41,7 @@ boost::beast::string_view mime_type(boost::beast::string_view path)
     if(iequals(ext, ".tif"))  return "image/tiff";
     if(iequals(ext, ".svg"))  return "image/svg+xml";
     if(iequals(ext, ".svgz")) return "image/svg+xml";
-    return "application/text";
+    return "application/octet-stream";
 }
 
 std::string path_cat(boost::beast::string_view base, boost::beast::string_view path)
@@ -62,21 +66,21 @@ std::string path_cat(boost::beast::string_view base, boost::beast::string_view p
     return result;
 }
 
-TransportServer::TransportServer(string listen_address, int listen_port, const string& root_dir) :
-    m_pool(io_service_pool::GetInstance()),
-    m_accept(m_pool.get_io_service(), tcp::endpoint(boost::asio::ip::address::from_string(listen_address), listen_port)),
+FileTransportServer::FileTransportServer(string listen_address, int listen_port, const string& root_dir) :
+    m_pool(IoContextPool::get_instance()),
+    m_accept(m_pool.get_io_context(), tcp::endpoint(boost::asio::ip::address::from_string(listen_address), listen_port)),
     m_doc_root(root_dir)
 {
 }
 
 
-TransportServer::~TransportServer()
+FileTransportServer::~FileTransportServer()
 {
 
 }
 
 
-void TransportServer::removeDown(const string& key, const DownTransportContextPtr& down)
+void FileTransportServer::removeDown(const string& key, const DownTransportContextPtr& down)
 {
     auto it = m_down_transport.find(key);
     if(it == m_down_transport.end())
@@ -99,7 +103,7 @@ void TransportServer::removeDown(const string& key, const DownTransportContextPt
 }
 
 
-void TransportServer::session(socket_ptr socket)
+void FileTransportServer::session(SocketPtr socket)
 {
     bool close = false;
     boost::system::error_code ec;
@@ -151,19 +155,6 @@ void TransportServer::session(socket_ptr socket)
                 return res;
             };
 
-            // Returns a server error response
-//            auto const server_error =
-//                    [&req](boost::beast::string_view what)
-//            {
-//                http::response<http::string_body> res{http::status::internal_server_error, req.version()};
-//                res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-//                res.set(http::field::content_type, "text/html");
-//                res.keep_alive(req.keep_alive());
-//                res.body() = "An error occurred: '" + what.to_string() + "'";
-//                res.prepare_payload();
-//                return res;
-//            };
-
             // Request path must be absolute and not contain "..".
             if( req.target().empty() ||
                     req.target()[0] != '/' ||
@@ -184,167 +175,82 @@ void TransportServer::session(socket_ptr socket)
                 LogErrorExt << "regex_match error,target:" << req.target().data();
                 return send(bad_request("Illegal request-target"));
             }
-
+            TransportContext cxt;
+            cxt.socket = socket;
+            cxt.query_params = parseQueryString(query_string);
+            cxt.path_params = sm_res;
+            cxt.file_dir = m_doc_root + sm_res[1];
+            cxt.file_path = cxt.file_dir + "/" + sm_res[2];
             if(req.method() == http::verb::get)
             {
                 LogDebug <<"get," << req.target();
-                std::string file_path = path_cat(m_doc_root, req.target());
                 boost::beast::error_code ec;
                 http::file_body::value_type body;
-                body.open(file_path.c_str(), boost::beast::file_mode::scan, ec);
-
+                body.open(cxt.file_path.c_str(), boost::beast::file_mode::scan, ec);
                 //本地文件不存在
                 if(ec == boost::system::errc::no_such_file_or_directory)
                 {
-                    //检查是否存在正在上传的session
-                    string key_filename = sm_res[1];
-                    auto it_upload = m_upload_transport.find(key_filename);
-                    if(it_upload == m_upload_transport.end())
+                    UploadTaskPtr upload_task;
                     {
+                        std::lock_guard<boost::fibers::mutex> lk(m_mutex);
+                        auto it = m_upload_tasks.find(cxt.file_path);
+                        if(it != m_upload_tasks.end())
+                        {
+                            upload_task = it->second;
+                        }
+                    }
+                    if(!upload_task)
                         return send(not_found(req.target()));
-                    }
-                    else
-                    {
-                        //边上传边下载实现
-                        DownTransportContextPtr down_transport(new DownTransportContext());
 
-                        UploadTransportContextPtr upload = it_upload->second;
-//                        auto it_file_size_it = upload->query_params.find("size");
-//                        if(it_file_size_it == upload->query_params.end())
-//                        {
-//                            LogErrorExt << "can not find file size";
-//                            return;
-//                        }
-
-                        auto& downs = m_down_transport[key_filename];
-                        downs.push_back(down_transport);
-                        //从upload中拿已上传的初始数据,不能放在async_write_header操作或其它会引起fiber调度的操作之后
-                        //,会引起上传的数据先被插入send_buffer中,然后再分配初始数据
-                        for(auto& s: upload->recv_buffers)
-                        {
-                            SendContent sc;
-                            sc.st = ST_SEND_NORMAL;
-                            sc.buf = s;
-                            down_transport->send_buffers.push_back(std::move(sc));
-                        }
-
-                        int length = upload->size;
-
-                        http::response<http::buffer_body> res;
-                        res.result(http::status::ok);
-                        res.version(11);
-                        res.content_length(length);
-                        res.body().data = nullptr;
-                        res.body().more = true;
-
-                        int send_body_size = 0;
-
-                        http::response_serializer<http::buffer_body, http::fields> sr{res};
-                        http::async_write_header(*socket, sr, boost::fibers::asio::yield[ec]);
-                        if(ec)
-                        {
-                            LogErrorExt << ec.message();
-                            removeDown(key_filename, down_transport);
-                            return;
-                        }
-
-                        while(1)
-                        {
-                            if(down_transport->send_buffers.empty())
-                            {
-                                boost::this_fiber::sleep_for(std::chrono::microseconds(30));
-                                continue;
-                            }
-                            SendContent& tmp = down_transport->send_buffers.front();
-                            SendContent send_data = std::move(tmp);
-                            down_transport->send_buffers.pop_front();
-                            if(send_data.st != ST_SEND_NORMAL)
-                            {
-                                LogWarnExt << "upload stop:" << static_cast<int>(send_data.st);
-                                removeDown(key_filename, down_transport);
-                                return;
-                            }
-
-                            res.body().data = const_cast<char*>(send_data.buf.c_str());
-                            res.body().size = send_data.buf.size();
-                            res.body().more = true;
-                            http::async_write(*socket, sr, boost::fibers::asio::yield[ec]);
-                            if(ec == http::error::need_buffer)
-                            {
-                                ec = {};
-                            }
-
-                            if(ec)
-                            {
-                                LogErrorExt << ec.message();
-                                removeDown(key_filename, down_transport);
-                                return;
-                            }
-                            send_body_size += send_data.buf.size();
-                            if(send_body_size >= length)
-                            {
-                                LogDebug << "send_body_size:" << send_body_size << ",length:" << length << ",file id:" << key_filename;
-                                break;
-                            }
-                        }
-                        res.body().data = nullptr;
-                        res.body().more = false;
-                        http::async_write(*socket, sr, boost::fibers::asio::yield[ec]);
-                        if(ec == http::error::need_buffer)
-                        {
-                            ec = {};
-                        }
-                        if(ec)
-                        {
-                            LogErrorExt << ec.message();
-                            removeDown(key_filename, down_transport);
-                            return;
-                        }
-                        removeDown(key_filename, down_transport);
-                    }
-                    return;
+                    DownTaskPtr down_task = std::make_shared<DownTask>(cxt);
+                    upload_task->addDownTask(down_task);
+                    down_task->start();
                 }
-
-                //本地文件存在
-                http::response<http::file_body> res
+                else
                 {
-                    std::piecewise_construct,
-                            std::make_tuple(std::move(body)),
-                            std::make_tuple(http::status::ok, req.version())
-                };
-                res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-                res.set(http::field::content_type, mime_type(file_path));
-                res.content_length(body.size());
-                res.keep_alive(req.keep_alive());
-                return send(std::move(res));
+                    //本地文件存在
+                    http::response<http::file_body> res
+                    {
+                        std::piecewise_construct,
+                                std::make_tuple(std::move(body)),
+                                std::make_tuple(http::status::ok, req.version())
+                    };
+                    res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
+                    res.set(http::field::content_type, mime_type(file_path));
+                    res.content_length(body.size());
+                    res.keep_alive(req.keep_alive());
+                    return send(std::move(res));
+                }
             }
             else if(req.method() == http::verb::post)
             {
-                LogDebug <<"post," << req.target();
-                //文件上传实现
-                string key_filename = sm_res[1];
-                UploadTransportContextPtr upload(new UploadTransportContext);
-//                upload->query_params = parseQueryString(query_string);
-//                auto it_file_size_it = upload->query_params.find("size");
-//                if(it_file_size_it == upload->query_params.end())
-//                {
-//                    LogErrorExt << "can not find file size";
-//                    return send(bad_request("size param is not set"));
-//                }
                 auto it_clen = req.find("Content-Length");
                 if(it_clen == req.end())
                 {
                     LogErrorExt << "not has Content-Length, file:" << key_filename;
                     return;
                 }
-                upload->size = std::stoi((*it_clen).value().data());
-                if(upload->size == 0)
+                cxt.file_size = std::stoi((*it_clen).value().data());
+                if(cxt.file_size == 0)
                 {
                     LogErrorExt << "file size is 0";
                     return;
                 }
+                UploadTaskPtr upload_task;
+                {
+                    std::lock_guard<boost::fibers::mutex> lk(m_mutex);
+                    auto it = m_upload_tasks.find(cxt.file_path);
+                    if(it != m_upload_tasks.end())
+                    {
+                        it->second->stop();
+                        m_upload_tasks.erase(it);
+                    }
+                    upload_task = std::make_shared<UploadTask>(cxt);
+                    m_upload_tasks[cxt.file_path] = upload_task;
 
-                m_upload_transport[key_filename] = upload;
+                }
+
+                upload_task->start();
                 int recv_size = 0;
                 while(!p.is_done())
                 {
@@ -359,81 +265,278 @@ void TransportServer::session(socket_ptr socket)
                     if(ec)
                     {
                         LogErrorExt << ec.message();
-                        auto downs_it = m_down_transport.find(key_filename);
-                        if(downs_it != m_down_transport.end())
-                        {
-                            auto& downs = downs_it->second;
-                            for(auto& d : downs)
-                            {
-                                SendContent sc;
-                                sc.st = ST_STOP_UPLOAD_ERROR;
-                                d->send_buffers.push_back(std::move(sc));
-                            }
-                        }
-                        m_upload_transport.erase(key_filename);
+                        upload_task->stop(STOP_REASEON::ERROR);
+
+                        std::lock_guard<boost::fibers::mutex> lk(m_mutex);
+                        m_upload_tasks.erase(cxt.file_path);
                         return;
                     }
                     recv_size += (sizeof(buf) - p.get().body().size);
                     string recv_buf(buf, sizeof(buf) - p.get().body().size);
-                    upload->recv_buffers.push_back(recv_buf);
-
-                    auto downs_it = m_down_transport.find(key_filename);
-                    if(downs_it != m_down_transport.end())
-                    {
-                        auto& downs = downs_it->second;
-                        for(auto& d : downs)
-                        {
-                            SendContent sc;
-                            sc.st = ST_SEND_NORMAL;
-                            sc.buf = recv_buf;
-                            d->send_buffers.push_back(std::move(sc));
-                        }
-                    }
+                    upload_task->recv(std::move(recv_buf));
                 }
-                if(recv_size != upload->size)
+                if(recv_size != cxt.file_size)
                 {
-                    LogErrorExt << "recv size not eq upload-size," << recv_size << "," << upload->size;
-                    auto downs_it = m_down_transport.find(key_filename);
-                    if(downs_it != m_down_transport.end())
+                    LogErrorExt << "recv size not eq upload-size," << recv_size << "," << cxt.file_size;
+                    upload_task->stop(STOP_REASEON::ERROR);
+
                     {
-                        auto& downs = downs_it->second;
-                        for(auto& d : downs)
-                        {
-                            SendContent sc;
-                            sc.st = ST_STOP_UPLOAD_ERROR;
-                            d->send_buffers.push_back(std::move(sc));
-                        }
+                        std::lock_guard<boost::fibers::mutex> lk(m_mutex);
+                        m_upload_tasks.erase(cxt.file_path);
                     }
-                    m_upload_transport.erase(key_filename);
                     return send(bad_request("recv size not eq content-length"));
                 }
-                auto downs_it = m_down_transport.find(key_filename);
-                if(downs_it != m_down_transport.end())
-                {
-                    auto& downs = downs_it->second;
-                    for(auto& d : downs)
-                    {
-                        SendContent sc;
-                        sc.st = ST_STOP_SUCCESS;
-                        d->send_buffers.push_back(std::move(sc));
-                    }
-                }
-                ofstream ofs;
-                ofs.open(m_doc_root + key_filename, std::ios_base::binary);
-                for(auto& s : upload->recv_buffers)
-                {
-                    ofs.write(s.c_str(), s.size());
-                }
-                ofs.close();
-                m_upload_transport.erase(key_filename);
-                // Respond to GET request
-                http::response<http::empty_body> res{http::status::ok, req.version()};
-                return send(std::move(res));;
             }
-            else
-            {
-                return send(bad_request("not support method"));;
-            }
+
+            //            if(req.method() == http::verb::get)
+            //            {
+            //                LogDebug <<"get," << req.target();
+            //                std::string file_path = path_cat(m_doc_root, req.target());
+            //                boost::beast::error_code ec;
+            //                http::file_body::value_type body;
+            //                body.open(file_path.c_str(), boost::beast::file_mode::scan, ec);
+
+            //                //本地文件不存在
+            //                if(ec == boost::system::errc::no_such_file_or_directory)
+            //                {
+            //                    //检查是否存在正在上传的session
+            //                    string key_filename = sm_res[1];
+            //                    auto it_upload = m_upload_transport.find(key_filename);
+            //                    if(it_upload == m_upload_transport.end())
+            //                    {
+            //                        return send(not_found(req.target()));
+            //                    }
+            //                    else
+            //                    {
+            //                        //边上传边下载实现
+            //                        DownTransportContextPtr down_transport(new DownTransportContext());
+
+            //                        UploadTransportContextPtr upload = it_upload->second;
+            ////                        auto it_file_size_it = upload->query_params.find("size");
+            ////                        if(it_file_size_it == upload->query_params.end())
+            ////                        {
+            ////                            LogErrorExt << "can not find file size";
+            ////                            return;
+            ////                        }
+
+            //                        auto& downs = m_down_transport[key_filename];
+            //                        downs.push_back(down_transport);
+            //                        //从upload中拿已上传的初始数据,不能放在async_write_header操作或其它会引起fiber调度的操作之后
+            //                        //,会引起上传的数据先被插入send_buffer中,然后再分配初始数据
+            //                        for(auto& s: upload->recv_buffers)
+            //                        {
+            //                            SendContent sc;
+            //                            sc.st = ST_SEND_NORMAL;
+            //                            sc.buf = s;
+            //                            down_transport->send_buffers.push_back(std::move(sc));
+            //                        }
+
+            //                        int length = upload->size;
+
+            //                        http::response<http::buffer_body> res;
+            //                        res.result(http::status::ok);
+            //                        res.version(11);
+            //                        res.content_length(length);
+            //                        res.body().data = nullptr;
+            //                        res.body().more = true;
+
+            //                        int send_body_size = 0;
+
+            //                        http::response_serializer<http::buffer_body, http::fields> sr{res};
+            //                        http::async_write_header(*socket, sr, boost::fibers::asio::yield[ec]);
+            //                        if(ec)
+            //                        {
+            //                            LogErrorExt << ec.message();
+            //                            removeDown(key_filename, down_transport);
+            //                            return;
+            //                        }
+
+            //                        while(1)
+            //                        {
+            //                            if(down_transport->send_buffers.empty())
+            //                            {
+            //                                boost::this_fiber::sleep_for(std::chrono::microseconds(30));
+            //                                continue;
+            //                            }
+            //                            SendContent& tmp = down_transport->send_buffers.front();
+            //                            SendContent send_data = std::move(tmp);
+            //                            down_transport->send_buffers.pop_front();
+            //                            if(send_data.st != ST_SEND_NORMAL)
+            //                            {
+            //                                LogWarnExt << "upload stop:" << static_cast<int>(send_data.st);
+            //                                removeDown(key_filename, down_transport);
+            //                                return;
+            //                            }
+
+            //                            res.body().data = const_cast<char*>(send_data.buf.c_str());
+            //                            res.body().size = send_data.buf.size();
+            //                            res.body().more = true;
+            //                            http::async_write(*socket, sr, boost::fibers::asio::yield[ec]);
+            //                            if(ec == http::error::need_buffer)
+            //                            {
+            //                                ec = {};
+            //                            }
+
+            //                            if(ec)
+            //                            {
+            //                                LogErrorExt << ec.message();
+            //                                removeDown(key_filename, down_transport);
+            //                                return;
+            //                            }
+            //                            send_body_size += send_data.buf.size();
+            //                            if(send_body_size >= length)
+            //                            {
+            //                                LogDebug << "send_body_size:" << send_body_size << ",length:" << length << ",file id:" << key_filename;
+            //                                break;
+            //                            }
+            //                        }
+            //                        res.body().data = nullptr;
+            //                        res.body().more = false;
+            //                        http::async_write(*socket, sr, boost::fibers::asio::yield[ec]);
+            //                        if(ec == http::error::need_buffer)
+            //                        {
+            //                            ec = {};
+            //                        }
+            //                        if(ec)
+            //                        {
+            //                            LogErrorExt << ec.message();
+            //                            removeDown(key_filename, down_transport);
+            //                            return;
+            //                        }
+            //                        removeDown(key_filename, down_transport);
+            //                    }
+            //                    return;
+            //                }
+
+            //                //本地文件存在
+            //                http::response<http::file_body> res
+            //                {
+            //                    std::piecewise_construct,
+            //                            std::make_tuple(std::move(body)),
+            //                            std::make_tuple(http::status::ok, req.version())
+            //                };
+            //                res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
+            //                res.set(http::field::content_type, mime_type(file_path));
+            //                res.content_length(body.size());
+            //                res.keep_alive(req.keep_alive());
+            //                return send(std::move(res));
+            //            }
+            //            else if(req.method() == http::verb::post)
+            //            {
+            //                LogDebug <<"post," << req.target();
+            //                //文件上传实现
+            //                string key_filename = sm_res[1];
+            //                UploadTransportContextPtr upload(new UploadTransportContext);
+            ////                upload->query_params = parseQueryString(query_string);
+            ////                auto it_file_size_it = upload->query_params.find("size");
+            ////                if(it_file_size_it == upload->query_params.end())
+            ////                {
+            ////                    LogErrorExt << "can not find file size";
+            ////                    return send(bad_request("size param is not set"));
+            ////                }
+            //                auto it_clen = req.find("Content-Length");
+            //                if(it_clen == req.end())
+            //                {
+            //                    LogErrorExt << "not has Content-Length, file:" << key_filename;
+            //                    return;
+            //                }
+            //                upload->size = std::stoi((*it_clen).value().data());
+            //                if(upload->size == 0)
+            //                {
+            //                    LogErrorExt << "file size is 0";
+            //                    return;
+            //                }
+
+            //                m_upload_transport[key_filename] = upload;
+            //                int recv_size = 0;
+            //                while(!p.is_done())
+            //                {
+            //                    char buf[1024];
+            //                    p.get().body().data = buf;
+            //                    p.get().body().size = sizeof(buf);
+            //                    http::async_read(*socket, buffer, p, boost::fibers::asio::yield[ec]);
+            //                    if(ec == http::error::need_buffer)
+            //                    {
+            //                        ec.assign(0, ec.category());
+            //                    }
+            //                    if(ec)
+            //                    {
+            //                        LogErrorExt << ec.message();
+            //                        auto downs_it = m_down_transport.find(key_filename);
+            //                        if(downs_it != m_down_transport.end())
+            //                        {
+            //                            auto& downs = downs_it->second;
+            //                            for(auto& d : downs)
+            //                            {
+            //                                SendContent sc;
+            //                                sc.st = ST_STOP_UPLOAD_ERROR;
+            //                                d->send_buffers.push_back(std::move(sc));
+            //                            }
+            //                        }
+            //                        m_upload_transport.erase(key_filename);
+            //                        return;
+            //                    }
+            //                    recv_size += (sizeof(buf) - p.get().body().size);
+            //                    string recv_buf(buf, sizeof(buf) - p.get().body().size);
+            //                    upload->recv_buffers.push_back(recv_buf);
+
+            //                    auto downs_it = m_down_transport.find(key_filename);
+            //                    if(downs_it != m_down_transport.end())
+            //                    {
+            //                        auto& downs = downs_it->second;
+            //                        for(auto& d : downs)
+            //                        {
+            //                            SendContent sc;
+            //                            sc.st = ST_SEND_NORMAL;
+            //                            sc.buf = recv_buf;
+            //                            d->send_buffers.push_back(std::move(sc));
+            //                        }
+            //                    }
+            //                }
+            //                if(recv_size != upload->size)
+            //                {
+            //                    LogErrorExt << "recv size not eq upload-size," << recv_size << "," << upload->size;
+            //                    auto downs_it = m_down_transport.find(key_filename);
+            //                    if(downs_it != m_down_transport.end())
+            //                    {
+            //                        auto& downs = downs_it->second;
+            //                        for(auto& d : downs)
+            //                        {
+            //                            SendContent sc;
+            //                            sc.st = ST_STOP_UPLOAD_ERROR;
+            //                            d->send_buffers.push_back(std::move(sc));
+            //                        }
+            //                    }
+            //                    m_upload_transport.erase(key_filename);
+            //                    return send(bad_request("recv size not eq content-length"));
+            //                }
+            //                auto downs_it = m_down_transport.find(key_filename);
+            //                if(downs_it != m_down_transport.end())
+            //                {
+            //                    auto& downs = downs_it->second;
+            //                    for(auto& d : downs)
+            //                    {
+            //                        SendContent sc;
+            //                        sc.st = ST_STOP_SUCCESS;
+            //                        d->send_buffers.push_back(std::move(sc));
+            //                    }
+            //                }
+            //                ofstream ofs;
+            //                ofs.open(m_doc_root + key_filename, std::ios_base::binary);
+            //                for(auto& s : upload->recv_buffers)
+            //                {
+            //                    ofs.write(s.c_str(), s.size());
+            //                }
+            //                ofs.close();
+            //                m_upload_transport.erase(key_filename);
+            //                // Respond to GET request
+            //                http::response<http::empty_body> res{http::status::ok, req.version()};
+            //                return send(std::move(res));;
+            //            }
+            //            else
+            //            {
+            //                return send(bad_request("not support method"));;
+            //            }
             if(close)
             {
                 // This means we should close the connection, usually because
@@ -451,13 +554,13 @@ void TransportServer::session(socket_ptr socket)
     }
 }
 
-void TransportServer::accept()
+void FileTransportServer::accept()
 {
     try
     {
         for (;;)
         {
-            socket_ptr socket(new tcp::socket(m_pool.get_io_service()));
+            SocketPtr socket(new tcp::socket(m_pool.get_io_service()));
             boost::system::error_code ec;
             m_accept.async_accept(
                         *socket,
@@ -468,9 +571,18 @@ void TransportServer::accept()
             }
             else
             {
-                boost::fibers::fiber([socket, this]() {
-                    this->session(socket);
-                }).detach();
+                boost::asio::post(socket->get_executor(), [socket, this](){
+                    boost::fibers::fiber([socket, this]() {
+                        try
+                        {
+                            this->session(socket);
+                        }
+                        catch (std::exception const &e)
+                        {
+                            LogErrorExt << e.what();
+                        }
+                    }).detach();
+                });
             }
         }
     }
@@ -481,14 +593,14 @@ void TransportServer::accept()
     //m_pool->stop();
 }
 
-void TransportServer::start()
+void FileTransportServer::start()
 {
     boost::fibers::fiber([this](){
         this->accept();
     }).detach();
 }
 
-bool TransportServer::parseTarget(const boost::beast::string_view& target, std::string &path, std::string &query_string)
+bool FileTransportServer::parseTarget(const boost::beast::string_view& target, std::string &path, std::string &query_string)
 {
     size_t query_start = target.find('?');
     if(query_start != boost::beast::string_view::npos)
@@ -503,7 +615,7 @@ bool TransportServer::parseTarget(const boost::beast::string_view& target, std::
     return true;
 }
 
-CaseInsensitiveMultimap TransportServer::parseQueryString(const std::string &query_string)
+CaseInsensitiveMultimap FileTransportServer::parseQueryString(const std::string &query_string)
 {
     CaseInsensitiveMultimap result;
 

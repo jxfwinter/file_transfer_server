@@ -6,8 +6,8 @@ int main(int argc, char **argv)
     namespace po = boost::program_options;
     try
     {
-        io_service_pool::m_pool_size = 8;
-        io_service_pool& pool = io_service_pool::GetInstance();
+        IoContextPool::m_pool_size = 8;
+        IoContextPool& pool = IoContextPool::get_instance();
 
         ConfigParams *params = ConfigParams::GetInstance();
 
@@ -22,8 +22,8 @@ int main(int argc, char **argv)
         string listen_address = "0.0.0.0";
         int listen_port = params->m_setting.at("port").get<int>();
         string root_dir = params->m_setting.at("root_dir").get<string>();
-        TransportServer tserver(listen_address, listen_port, root_dir);
-        cout << "TransportServer::GetInstance()->start()\n";
+        FileTransportServer tserver(listen_address, listen_port, root_dir);
+        cout << "FileTransportServer::GetInstance()->start()\n";
         tserver.start();
         pool.run();
     }

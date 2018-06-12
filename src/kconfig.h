@@ -40,6 +40,7 @@ using namespace boost;
 using namespace boost::posix_time;
 using namespace boost::uuids;
 using namespace boost::property_tree;
+namespace fs = boost::filesystem;
 
 class ConfigParams
 {

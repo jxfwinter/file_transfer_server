@@ -1,9 +1,13 @@
-config/file_transport_webserver.json
+config/file_transport_server.json
 src/CMakeLists.txt
+src/down_task.cpp
+src/down_task.h
 src/kconfig.cpp
 src/kconfig.h
 src/main.cpp
 src/transport_server.cpp
 src/transport_server.h
+src/upload_task.cpp
+src/upload_task.h
 test_client/CMakeLists.txt
 test_client/main.cpp

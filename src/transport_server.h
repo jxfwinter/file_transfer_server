@@ -34,7 +34,7 @@
 
 #include <boost/fiber/all.hpp>
 #include "yield.hpp"
-#include "io_service_pool.hpp"
+#include "io_context_pool.hpp"
 #include "logger.h"
 #include "web_utility.h"
 
@@ -43,10 +43,7 @@ using namespace boost::beast;
 using namespace std;
 using boost::asio::ip::tcp;
 
-typedef std::shared_ptr<tcp::socket> socket_ptr;
-typedef http::request<http::string_body> Request;
-typedef http::response<http::string_body> Response;
-
+typedef std::shared_ptr<tcp::socket> SocketPtr;
 
 // This is the C++11 equivalent of a generic lambda.
 // The function object is used to send an HTTP message.
@@ -87,60 +84,80 @@ struct send_lambda
     }
 };
 
-//文件上传格式 post http://xxx.com/filename.jpg 必须带有content-length字段
-//文件下载 get http://xxx.com/filename.jpg
-//不支持断点续传,主要用于边上传边下载这种模式，上传的文件会定期清理
+//文件上传格式 post http://xxx.com/{dir}/filename.jpg 必须有 Content-Lenght
+//文件下载 get http://xxx.com/{dir}/filename.jpg
 
-struct UploadTransportContext
-{
-    CaseInsensitiveMultimap query_params; //url
-    std::list<string> recv_buffers;
-    int size = 0;
-};
+//文件上传格式 post http://xxx.com/{dir}/filename88766_12398776.mp4 必须有 Content-Lenght
+//文件下载 get http://xxx.com/{dir}/filename88766_12398776.mp4
 
-enum SendType
-{
-    ST_STOP_SUCCESS = 0,
-    ST_STOP_UPLOAD_ERROR = 1,
-    ST_SEND_NORMAL = 2,
-};
+//不支持断点续传,主要用于边上传边下载这种模式，上传的文件会定期清理，文件必须带有扩展名
+//如果要支持断点续传,下载方与上传方协商,比如重新指定一个上传文件名进行断点续传
 
-struct SendContent
-{
-    SendType st = ST_SEND_NORMAL;
-    string buf;
-    SendContent()
-    {
-    }
-    SendContent(SendContent&& sc)
-    {
-        st = sc.st;
-        buf = std::move(sc.buf);
-    }
+//struct UploadTransportContext
+//{
+//    CaseInsensitiveMultimap query_params; //url
+//    std::list<string> recv_buffers;
+//    int size = 0;
+//};
 
-    SendContent& operator = (SendContent&& sc)
-    {
-        st = sc.st;
-        buf = std::move(sc.buf);
-        return *this;
-    }
-};
+//enum SendType
+//{
+//    ST_STOP_SUCCESS = 0,
+//    ST_STOP_UPLOAD_ERROR = 1,
+//    ST_SEND_NORMAL = 2,
+//};
 
-struct DownTransportContext
+//struct SendContent
+//{
+//    SendType st = ST_SEND_NORMAL;
+//    string buf;
+//    SendContent()
+//    {
+//    }
+//    SendContent(SendContent&& sc)
+//    {
+//        st = sc.st;
+//        buf = std::move(sc.buf);
+//    }
+
+//    SendContent& operator = (SendContent&& sc)
+//    {
+//        st = sc.st;
+//        buf = std::move(sc.buf);
+//        return *this;
+//    }
+//};
+
+//struct DownTransportContext
+//{
+//    boost::smatch path_params;
+//    CaseInsensitiveMultimap query_params;
+//    std::list<SendContent> send_buffers;
+//};
+
+class UploadTask;
+typedef std::shared_ptr<UploadTask> UploadTaskPtr;
+
+struct TransportContext
 {
     boost::smatch path_params;
     CaseInsensitiveMultimap query_params;
-    std::list<SendContent> send_buffers;
+    string file_dir;
+    string file_path;
+    SocketPtr socket;
+    int file_size = 0;
 };
 
-typedef std::shared_ptr<UploadTransportContext> UploadTransportContextPtr;
-typedef std::shared_ptr<DownTransportContext> DownTransportContextPtr;
+typedef std::shared_ptr<TransportContext> TransportContextPtr;
 
-class TransportServer
+//typedef std::shared_ptr<UploadTransportContext> UploadTransportContextPtr;
+//typedef std::shared_ptr<DownTransportContext> DownTransportContextPtr;
+
+class FileTransportServer
 {
 public:
-    TransportServer(string listen_address, int listen_port, const string& root_dir);
-    ~TransportServer();
+    FileTransportServer(string listen_address, int listen_port, const string& root_dir);
+    ~FileTransportServer();
 
     void start();
 
@@ -151,7 +168,7 @@ private:
     /*****************************************************************************
     *   fiber function per server connection
     *****************************************************************************/
-    void session(socket_ptr socket);
+    void session(SocketPtr socket);
 
     void accept();
 
@@ -159,14 +176,17 @@ private:
     void removeDown(const string& key, const DownTransportContextPtr &down);
 
 private:
-    io_service_pool& m_pool;
+    IoContextPool & m_pool;
     tcp::acceptor m_accept;
     string  m_doc_root;
 
-    map<string, UploadTransportContextPtr> m_upload_transport;
-    map<string, vector<DownTransportContextPtr>> m_down_transport;
+    //map<string, UploadTransportContextPtr> m_upload_transport;
+    //map<string, vector<DownTransportContextPtr>> m_down_transport;
+    //key为 file_path;
+    map<string, UploadTaskPtr> m_upload_tasks;
+    boost::fibers::mutex m_mutex;
 
-    boost::regex m_target_file_regex = boost::regex("^/([0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{12}.*)$");
+    boost::regex m_target_file_regex = boost::regex("^/([0-9a-zA-Z]{1,32})/([_0-9a-zA-Z]{1,32}.*)$");
     int m_body_limit = 1024*1024*100;
 };
 
