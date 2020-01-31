@@ -1,6 +1,5 @@
+D:\msys64\usr\include
+D:\msys64\usr\lib\gcc\x86_64-pc-msys\9.1.0\include\c++
 src
 config
-server_kit/include
-server_kit/include/web_tool
-D:\msys64\usr\include
-D:\msys64\usr\lib\gcc\x86_64-pc-msys\7.3.0\include\c++
+include
