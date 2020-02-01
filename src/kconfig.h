@@ -1,8 +1,6 @@
 #ifndef KCONFIG_H
 #define KCONFIG_H
 
-#define BOOST_COROUTINES_NO_DEPRECATION_WARNING
-
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,62 +10,54 @@
 #include <iostream>
 #include <set>
 #include <chrono>
-#include <boost/uuid/uuid.hpp>
 #include <boost/date_time.hpp>
-#include <boost/uuid/uuid_generators.hpp>
-#include <boost/uuid/uuid_io.hpp>
-#include <boost/lexical_cast.hpp>
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/date_time/gregorian/gregorian.hpp>
-#include <boost/date_time/gregorian/greg_duration.hpp>
-#include <boost/algorithm/string.hpp>
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/unordered_map.hpp>
 #include <boost/thread.hpp>
 #include <boost/regex.hpp>
-#include <boost/property_tree/ptree.hpp>
-#include <boost/property_tree/xml_parser.hpp>
-
-#include <boost/fiber/all.hpp>
 #include <boost/beast.hpp>
 
-#include "exception_trace.h"
 #include "logger.h"
-#include "yield.hpp"
-#include "io_context_pool.hpp"
-#include "web_utility.h"
-#include "json.hpp"
+#include "web_utility.hpp"
 
-using namespace nlohmann;
-using namespace std;
-using namespace boost;
-using namespace boost::posix_time;
-using namespace boost::uuids;
-using namespace boost::property_tree;
-namespace fs = boost::filesystem;
+using std::string;
+using std::vector;
+using std::map;
 
-class ConfigParams
+namespace http = boost::beast::http;
+namespace asio = boost::asio;
+
+typedef boost::asio::io_context IoContext;
+typedef boost::asio::ip::tcp::acceptor Acceptor;
+typedef boost::asio::ip::tcp::endpoint Endpoint;
+typedef boost::asio::ip::tcp::socket TcpSocket;
+typedef boost::asio::executor_work_guard<boost::asio::io_context::executor_type> IoContextWork;
+
+typedef boost::system::error_code BSError;
+
+typedef http::request<http::string_body> StrRequest;
+typedef http::response<http::string_body> StrResponse;
+
+struct ConfigParams
 {
-  public:
-    bool initJsonSetting(int argc, char **argv);
-    static ConfigParams *GetInstance();
-    json m_setting;
+    uint16_t thread_pool = 1;
 
-  private:
-    ConfigParams();
-    static ConfigParams *m_instance;
+    string http_listen_addr = "0.0.0.0";
+    uint16_t http_listen_port = 2080;
+
+    string http_target_prefix;
+
+    int body_limit = 0;
+    int body_duration;
+
+    string log_path;
+    boost::log::trivial::severity_level log_level = boost::log::trivial::debug;
 };
 
-//将字符串时间(不包含日期)转为秒数
-int timeStringConvertSeconds(const string &t);
+//初始化参数
+bool init_params(int argc, char** argv, ConfigParams& params);
 
-//从url中解析出 host_port与target  example http://sh.xxx.com:5001/push  host_port sh.xxx.com:5001 target /push
-//  http://sh.xxx.com/push  host_port sh.xxx.com path /push
-bool parseHostPortByHttpUrl(const string &url, string &host_port, string &target);
-
-//从url中解析出 host, port target  example http://sh.xxx.com:5001/push  host sh.xxx.com port 5001 target /push
-//  http://sh.xxx.com/push  host port sh.xxx.com target /push
-bool parseHostPortByHttpUrl(const string &url, string &host, string& port, string &target);
-
+//全局变量
+extern ConfigParams* g_cfg;
 #endif

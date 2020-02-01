@@ -1,59 +1,7 @@
-//          Copyright 2003-2013 Christopher M. Kohlhoff
-//          Copyright Oliver Kowalke, Nat Goodspeed 2015.
-// Distributed under the Boost Software License, Version 1.0.
-//    (See accompanying file LICENSE_1_0.txt or copy at
-//          http://www.boost.org/LICENSE_1_0.txt)
-
 #ifndef TRANSPORT_SERVER_H
 #define TRANSPORT_SERVER_H
 
 #include "kconfig.h"
-
-using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
-using namespace boost::beast;
-using namespace std;
-using boost::asio::ip::tcp;
-
-typedef std::shared_ptr<tcp::socket> SocketPtr;
-
-// This is the C++11 equivalent of a generic lambda.
-// The function object is used to send an HTTP message.
-template<class Stream>
-struct send_lambda
-{
-    Stream& stream_;
-    bool& close_;
-    boost::system::error_code& ec_;
-
-    explicit
-    send_lambda(
-            Stream& stream,
-            bool& close,
-            boost::system::error_code& ec)
-        : stream_(stream)
-        , close_(close)
-        , ec_(ec)
-    {
-    }
-
-    template<bool isRequest, class Body, class Fields>
-    void
-    operator()(http::message<isRequest, Body, Fields>&& msg) const
-    {
-        // Determine if we should close the connection after
-        close_ = ! msg.keep_alive();
-
-        // We need the serializer here because the serializer requires
-        // a non-const file_body, and the message oriented version of
-        // http::write only works with const messages.
-        http::serializer<isRequest, Body, Fields> sr{msg};
-        http::async_write(stream_, sr, boost::fibers::asio::yield[ec_]);
-        if(ec_)
-        {
-            LogErrorExt << ec_.message();
-        }
-    }
-};
 
 //文件上传格式 post http://xxx.com/{dir}/filename.jpg 必须有 Content-Lenght
 //文件下载 get http://xxx.com/{dir}/filename.jpg

@@ -1,0 +1,21 @@
+config("myconfig") {
+    include_dirs = [
+        "./common",
+        "./include",
+    ]
+    lib_dirs = ["./lib"]
+}
+
+executable("file_transfer_server") {
+    configs += [ ":myconfig" ]
+    configs -= [ "//build/config:c++11" ]
+    configs += [ "//build/config:c++17" ]
+
+    sources = [
+        "./src/main.cpp"
+        ]
+    libs = ["boost_date_time","boost_filesystem","boost_log_setup","boost_log",
+            "boost_program_options",]
+}
+
+
